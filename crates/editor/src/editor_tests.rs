@@ -2746,6 +2746,84 @@ fn test_only_focused_editor_blinks_across_window_activation(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn test_cursor_blink_only_resyncs_when_the_blink_setting_changes(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let window = cx.add_window(|window, cx| Editor::single_line(window, cx));
+    let cx = &mut VisualTestContext::from_window(*window, cx);
+    window
+        .update(cx, |editor, window, cx| {
+            window.focus(&editor.focus_handle(cx), cx);
+            window.activate_window();
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    let cursor_visible = |cx: &mut VisualTestContext| {
+        window
+            .update(cx, |editor, window, cx| {
+                editor.show_local_cursors(window, cx)
+            })
+            .unwrap()
+    };
+    let update_editor_settings = |cx: &mut VisualTestContext, f: &dyn Fn(&mut EditorSettingsContent)| {
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| f(&mut settings.editor));
+            })
+        });
+    };
+
+    // Focusing pauses blinking for a beat; let that pass so the cursor is on
+    // its steady cadence before measuring.
+    cx.executor()
+        .advance_clock(CURSOR_BLINK_INTERVAL + Duration::from_millis(100));
+    cx.run_until_parked();
+    let phase = cursor_visible(cx);
+    cx.executor().advance_clock(CURSOR_BLINK_INTERVAL);
+    cx.run_until_parked();
+    let visible_before = cursor_visible(cx);
+    assert_ne!(
+        phase, visible_before,
+        "the cursor should be blinking before the settings writes below"
+    );
+
+    // No clock advancement from here: only a settings observer could change
+    // cursor visibility.
+    update_editor_settings(cx, &|settings| {
+        settings.hover_popover_enabled = Some(false)
+    });
+    assert_eq!(
+        cursor_visible(cx),
+        visible_before,
+        "a settings change that leaves cursor_blink alone must not move the cursor off its blink cycle"
+    );
+
+    update_editor_settings(cx, &|settings| settings.cursor_blink = Some(false));
+    assert!(
+        cursor_visible(cx),
+        "turning cursor_blink off should leave the cursor showing"
+    );
+    cx.executor().advance_clock(CURSOR_BLINK_INTERVAL * 4);
+    cx.run_until_parked();
+    assert!(
+        cursor_visible(cx),
+        "the cursor should stay showing while cursor_blink is off"
+    );
+
+    update_editor_settings(cx, &|settings| settings.cursor_blink = Some(true));
+    cx.run_until_parked();
+    let resumed = cursor_visible(cx);
+    cx.executor().advance_clock(CURSOR_BLINK_INTERVAL);
+    cx.run_until_parked();
+    assert_ne!(
+        cursor_visible(cx),
+        resumed,
+        "turning cursor_blink back on should resume blinking"
+    );
+}
+
+#[gpui::test]
 fn test_beginning_end_of_line_ignore_soft_wrap(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
     let move_to_beg = MoveToBeginningOfLine {

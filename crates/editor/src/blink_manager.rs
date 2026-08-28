@@ -14,6 +14,8 @@ pub struct BlinkManager {
     enabled: bool,
     /// Whether the blinking is enabled in the settings.
     blink_enabled_in_settings: fn(&App) -> bool,
+    /// The last value read from `blink_enabled_in_settings`.
+    was_enabled_in_settings: bool,
 }
 
 impl BlinkManager {
@@ -22,9 +24,16 @@ impl BlinkManager {
         blink_enabled_in_settings: fn(&App) -> bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Make sure we blink the cursors if the setting is re-enabled
+        // This fires on every settings change, so resync only when the blink
+        // setting itself flipped. Resyncing unconditionally toggles `visible`
+        // mid-cycle, which makes the cursor flicker whenever anything writes
+        // settings.
         cx.observe_global::<SettingsStore>(move |this, cx| {
-            this.blink_cursors(this.blink_epoch, cx)
+            let enabled_in_settings = (this.blink_enabled_in_settings)(cx);
+            if enabled_in_settings != this.was_enabled_in_settings {
+                this.was_enabled_in_settings = enabled_in_settings;
+                this.blink_cursors(this.blink_epoch, cx);
+            }
         })
         .detach();
 
@@ -35,6 +44,7 @@ impl BlinkManager {
             visible: true,
             enabled: false,
             blink_enabled_in_settings,
+            was_enabled_in_settings: blink_enabled_in_settings(cx),
         }
     }
 
