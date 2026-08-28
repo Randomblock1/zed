@@ -642,13 +642,16 @@ impl PickerDelegate for LanguageModelPickerDelegate {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use super::*;
     use futures::{future::BoxFuture, stream::BoxStream};
-    use gpui::{AsyncApp, TestAppContext};
+    use gpui::{AsyncApp, TestAppContext, VisualTestContext};
     use language_model::{
         LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelId,
         LanguageModelName, LanguageModelProviderId, LanguageModelProviderName,
-        LanguageModelRequest, LanguageModelToolChoice,
+        LanguageModelRequest, LanguageModelToolChoice, fake_provider::FakeLanguageModelProvider,
     };
     use ui::IconName;
 
@@ -979,6 +982,129 @@ mod tests {
             model_ids,
             vec!["openrouter/model-a", "openrouter/model-b", "zed/claude"]
         );
+    }
+
+    fn entry_labels(entries: &[LanguageModelPickerEntry]) -> Vec<String> {
+        entries
+            .iter()
+            .map(|entry| match entry {
+                LanguageModelPickerEntry::Model(info) => info.model.name().0.to_string(),
+                LanguageModelPickerEntry::Separator(title)
+                | LanguageModelPickerEntry::GroupHeader { title, .. } => title.to_string(),
+            })
+            .collect()
+    }
+
+    fn register_provider(models: Vec<(&str, &str)>, cx: &mut App) {
+        let provider = models[0].0.to_string();
+        let models = models
+            .into_iter()
+            .map(|(provider, name)| {
+                Arc::new(TestLanguageModel::new(name, provider)) as Arc<dyn LanguageModel>
+            })
+            .collect();
+        LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+            registry.register_provider(
+                Arc::new(
+                    FakeLanguageModelProvider::new(
+                        LanguageModelProviderId::from(provider.clone()),
+                        LanguageModelProviderName::from(provider),
+                    )
+                    .with_models(models),
+                ),
+                cx,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn confirming_group_header_toggles_collapse(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            language_model::init(cx);
+
+            register_provider(vec![("alpha", "alpha/one"), ("alpha", "alpha/two")], cx);
+            register_provider(vec![("beta", "beta/one")], cx);
+        });
+
+        let fs = fs::FakeFs::new(cx.executor());
+        let selected_models = Rc::new(RefCell::new(Vec::<String>::new()));
+        let window_handle = cx.add_window({
+            let selected_models = selected_models.clone();
+            move |window, cx| {
+                language_model_selector(
+                    |_| None,
+                    move |model, _| selected_models.borrow_mut().push(model.name().0.to_string()),
+                    |_, _, _| {},
+                    fs,
+                    true,
+                    cx.focus_handle(),
+                    window,
+                    cx,
+                )
+            }
+        });
+        cx.run_until_parked();
+
+        let picker = window_handle.root(cx).unwrap();
+        let dismiss_count = Rc::new(RefCell::new(0));
+        let _dismiss_subscription = cx.update(|cx| {
+            cx.subscribe(&picker, {
+                let dismiss_count = dismiss_count.clone();
+                move |_, _: &DismissEvent, _| *dismiss_count.borrow_mut() += 1
+            })
+        });
+
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+        window_handle
+            .update(&mut cx, |picker, window, cx| {
+                assert_eq!(
+                    entry_labels(&picker.delegate.filtered_entries),
+                    vec!["alpha", "alpha/one", "alpha/two", "beta", "beta/one"]
+                );
+
+                picker.delegate.set_selected_index(3, window, cx);
+                picker.delegate.confirm(false, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        window_handle
+            .update(&mut cx, |picker, window, cx| {
+                assert_eq!(
+                    entry_labels(&picker.delegate.filtered_entries),
+                    vec!["alpha", "alpha/one", "alpha/two", "beta"]
+                );
+
+                // Confirming the collapsed header again expands the group.
+                picker.delegate.set_selected_index(3, window, cx);
+                picker.delegate.confirm(false, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        window_handle
+            .update(&mut cx, |picker, window, cx| {
+                assert_eq!(
+                    entry_labels(&picker.delegate.filtered_entries),
+                    vec!["alpha", "alpha/one", "alpha/two", "beta", "beta/one"]
+                );
+                // Toggling headers never selects a model or dismisses the picker.
+                assert!(selected_models.borrow().is_empty());
+                assert_eq!(*dismiss_count.borrow(), 0);
+
+                // Confirming a model does both.
+                picker.delegate.set_selected_index(1, window, cx);
+                picker.delegate.confirm(false, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(selected_models.borrow().as_slice(), ["alpha/one"]);
+        assert_eq!(*dismiss_count.borrow(), 1);
     }
 
     #[gpui::test]
